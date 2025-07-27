@@ -56,7 +56,7 @@ class HashTable(object):
        >>> list_of_ids_tracks = ht.get_hits(hash)
     """
 
-    def __init__(self, filename=None, hashbits=20, depth=100, maxtime=16384):
+    def __init__(self, filename=None, hashbits=20, depth=100, maxtime=1048576):
         """ allocate an empty hash table of the specified size """
         if filename is not None:
             self.load(filename)

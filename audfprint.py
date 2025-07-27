@@ -352,11 +352,11 @@ Usage: audfprint (new | add | match | precompute | merge | newmerge | list | rem
 
 Options:
   -d <dbase>, --dbase <dbase>     Fingerprint database file
-  -n <dens>, --density <dens>     Target hashes per second [default: 20.0]
+  -n <dens>, --density <dens>     Target hashes per second [default: 1.0]
   -h <bits>, --hashbits <bits>    How many bits in each hash [default: 20]
   -b <val>, --bucketsize <val>    Number of entries per bucket [default: 100]
-  -t <val>, --maxtime <val>       Largest time value stored [default: 16384]
-  -u <val>, --maxtimebits <val>   maxtime as a number of bits (16384 == 14 bits)
+  -t <val>, --maxtime <val>       Largest time value stored [default: 1048576]
+  -u <val>, --maxtimebits <val>   maxtime as a number of bits (1048576 = 20 bits) [default: 20]
   -r <val>, --samplerate <val>    Resample input files to this [default: 11025]
   -p <dir>, --precompdir <dir>    Save precomputed files under this dir [default: .]
   -i <val>, --shifts <val>        Use this many subframe shifts building fp [default: 0]

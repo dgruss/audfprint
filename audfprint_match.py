@@ -311,6 +311,75 @@ class Matcher(object):
                     still_looking = False
         return results[:nresults, :]
 
+    def match_single(self, fingerprint, hashes, hashesfor=None):
+        """ Match audio against fingerprint hash table.
+            Return top N matches as (id, filteredmatches, timoffs, rawmatches,
+            origrank, mintime, maxtime)
+            If hashesfor specified, return the actual matching hashes for that
+            hit (0=top hit).
+        """
+        # find the implicated id, time pairs from hash table
+        # log("nhashes=%d" % np.shape(hashes)[0])
+        
+        def _get_hits(fingerprint, hashes):
+            """ Return np.array of [id, delta_time, hash, time] rows
+                associated with each element in hashes array of [time, hash] rows.
+                This version has get_entry() inlined, it's about 30% faster.
+            """
+            # Allocate to largest possible number of hits
+            nhashes = np.shape(hashes)[0]
+            hits = np.zeros((nhashes * 100, 4), np.int32)
+            nhits = 0
+            maxtimemask = (1 << 20) - 1
+            hashmask = (1 << 20) - 1
+            # Fill in
+            for ix in range(nhashes):
+                time_ = hashes[ix][0]
+                hash_ = hashmask & hashes[ix][1]
+                nids = min(100, 100)
+                tabvals = fingerprint
+                hitrows = nhits + np.arange(nids)
+                # Make external IDs start from 0.
+                hits[hitrows, 0] = (tabvals >> 20) - 1
+                hits[hitrows, 1] = (tabvals & maxtimemask) - time_
+                hits[hitrows, 2] = hash_
+                hits[hitrows, 3] = time_
+                nhits += nids
+            # Discard the excess rows
+            hits.resize((nhits, 4))
+            return hits
+
+        hits = _get_hits(fingerprint, hashes)
+
+        bestids, rawcounts = 0,0
+
+        # log("len(rawcounts)=%d max(rawcounts)=%d" %
+        #    (len(rawcounts), max(rawcounts)))
+        if not self.exact_count:
+            results = self._approx_match_counts(hits, bestids, rawcounts)
+        else:
+            results = self._exact_match_counts(hits, bestids, rawcounts,
+                                               hashesfor)
+        # Sort results by filtered count, descending
+        results = results[(-results[:, 1]).argsort(),]
+        # Where was our best hit in the unfiltered count ranking?
+        # (4th column is rank in original list; look at top hit)
+        # if np.shape(results)[0] > 0:
+        #    bestpos = results[0, 4]
+        #    print "bestpos =", bestpos
+        # Could use to collect stats on best search-depth to use...
+
+        # Now strip the final column (original raw-count-based rank)
+        # results = results[:, :4]
+
+        if hashesfor is None:
+            return results
+        else:
+            id = results[hashesfor, 0]
+            mode = results[hashesfor, 2]
+            hashesforhashes = self._unique_match_hashes(id, hits, mode)
+            return results, hashesforhashes
+
     def match_hashes(self, ht, hashes, hashesfor=None):
         """ Match audio against fingerprint hash table.
             Return top N matches as (id, filteredmatches, timoffs, rawmatches,
@@ -351,6 +420,33 @@ class Matcher(object):
             hashesforhashes = self._unique_match_hashes(id, hits, mode)
             return results, hashesforhashes
 
+    def match_single_file(self, analyzer, fingerprint, filename, number=None):
+        """ Read in an audio file, calculate its landmarks, query against
+            single file.  Return top N matches as (id, filterdmatchcount,
+            timeoffs, rawmatchcount), also length of input file in sec,
+            and count of raw query hashes extracted
+        """
+        q_hashes = analyzer.wavfile2hashes(filename)
+        # Fake durations as largest hash time
+        if len(q_hashes) == 0:
+            durd = 0.0
+        else:
+            durd = analyzer.n_hop * q_hashes[-1][0] / analyzer.target_sr
+        if self.verbose:
+            if number is not None:
+                numberstring = "#%d" % number
+            else:
+                numberstring = ""
+            print(time.ctime(), "Analyzed", numberstring, filename, "of",
+                  ('%.3f' % durd), "s "
+                                   "to", len(q_hashes), "hashes")
+        # Run query
+        rslts = self.match_single(fingerprint, q_hashes)
+        # Post filtering
+        if self.sort_by_time:
+            rslts = rslts[(-rslts[:, 2]).argsort(), :]
+        return rslts[:self.max_returns, :], durd, len(q_hashes)
+
     def match_file(self, analyzer, ht, filename, number=None):
         """ Read in an audio file, calculate its landmarks, query against
             hash table.  Return top N matches as (id, filterdmatchcount,
@@ -378,10 +474,10 @@ class Matcher(object):
             rslts = rslts[(-rslts[:, 2]).argsort(), :]
         return rslts[:self.max_returns, :], durd, len(q_hashes)
 
-    def file_match_to_msgs(self, analyzer, ht, qry, number=None):
+    def file_match_to_msgs_single(self, analyzer, fingerprint, qry, number=None):
         """ Perform a match on a single input file, return list
             of message strings """
-        rslts, dur, nhash = self.match_file(analyzer, ht, qry, number)
+        rslts, dur, nhash = self.match_single_file(analyzer, fingerprint, qry, number)
         t_hop = analyzer.n_hop / analyzer.target_sr
         if self.verbose:
             qrymsg = qry + (' %.1f ' % dur) + "sec " + str(nhash) + " raw hashes"
@@ -402,12 +498,51 @@ class Matcher(object):
                 # figure the number of raw and aligned matches for top hit
                 if self.verbose:
                     if self.find_time_range:
-                        msg = ("Matched {:6.1f} s starting at {:6.1f} s in {:s}"
-                               " to time {:6.1f} s in {:s}").format(
+                        msg = ("Matched {:6.3f} s starting at {:6.3f} s in {:s}"
+                               " to time {:6.3f} s in {:s}").format(
+                                (max_time - min_time) * t_hop, min_time * t_hop, qry,
+                                (min_time + aligntime) * t_hop, 'provided afpt file')
+                    else:
+                        msg = "Matched {:s} as {:s} at {:6.3f} s".format(
+                                qrymsg, 'provided afpt file', aligntime * t_hop)
+                    msg += (" with {:5d} of {:5d} common hashes"
+                            " at rank {:2d}").format(
+                            nhashaligned, nhashraw, rank)
+                    msgrslt.append(msg)
+                else:
+                    msgrslt.append(qrymsg + "\t" + 'provided afpt file')
+        return msgrslt
+
+    def file_match_to_msgs(self, analyzer, ht, qry, number=None):
+        """ Perform a match on a single input file, return list
+            of message strings """
+        rslts, dur, nhash = self.match_single_file(analyzer, ht, qry, number)
+        t_hop = analyzer.n_hop / analyzer.target_sr
+        if self.verbose:
+            qrymsg = qry + (' %.1f ' % dur) + "sec " + str(nhash) + " raw hashes"
+        else:
+            qrymsg = qry
+
+        msgrslt = []
+        if len(rslts) == 0:
+            # No matches returned at all
+            nhashaligned = 0
+            if self.verbose:
+                msgrslt.append("NOMATCH " + qrymsg)
+            else:
+                msgrslt.append(qrymsg + "\t")
+        else:
+            for (tophitid, nhashaligned, aligntime, nhashraw, rank,
+                 min_time, max_time) in rslts:
+                # figure the number of raw and aligned matches for top hit
+                if self.verbose:
+                    if self.find_time_range:
+                        msg = ("Matched {:6.3f} s starting at {:6.3f} s in {:s}"
+                               " to time {:6.3f} s in {:s}").format(
                                 (max_time - min_time) * t_hop, min_time * t_hop, qry,
                                 (min_time + aligntime) * t_hop, ht.names[tophitid])
                     else:
-                        msg = "Matched {:s} as {:s} at {:6.1f} s".format(
+                        msg = "Matched {:s} as {:s} at {:6.3f} s".format(
                                 qrymsg, ht.names[tophitid], aligntime * t_hop)
                     msg += (" with {:5d} of {:5d} common hashes"
                             " at rank {:2d}").format(
